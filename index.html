@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0f261e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="サイコロ">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<title>サイコロ</title>
+<style>
+:root{--felt:#1f4a3c;--felt-d:#0f261e;--ink:#f1efe8;box-sizing:border-box}
+html,body{height:100%;margin:0;overflow:hidden;overscroll-behavior:none;touch-action:manipulation;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none}
+body{background:radial-gradient(ellipse at 50% 45%,var(--felt) 0,var(--felt-d) 85%);color:var(--ink);font-family:"Hiragino Sans","Noto Sans JP","Yu Gothic",sans-serif;user-select:none;-webkit-user-select:none}
+#c{position:fixed;inset:0;width:100%;height:100%;display:block}
+.top{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 18px) 16px 0;text-align:center;pointer-events:none}
+#sum{font-size:clamp(40px,11vw,64px);font-weight:700;line-height:1.1}
+#parts{font-size:16px;opacity:.75;min-height:1.4em;margin-top:4px}
+.panel{position:fixed;left:0;right:0;bottom:0;padding:16px 14px calc(env(safe-area-inset-bottom,0px) + 16px);display:flex;flex-direction:column;align-items:center;gap:12px;background:linear-gradient(transparent,rgba(8,20,15,.75) 40%)}
+.row{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
+.lab{font-size:13px;opacity:.7;width:100%;text-align:center;margin-bottom:-2px}
+.chip{font:inherit;font-size:15px;color:var(--ink);background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:8px 14px;cursor:pointer}
+.chip[aria-pressed=true]{background:var(--ink);color:var(--felt-d);border-color:var(--ink);font-weight:700}
+#roll{font:inherit;font-size:18px;font-weight:700;color:var(--felt-d);background:#ffd76a;border:0;border-radius:999px;padding:13px 56px;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible{outline:3px solid #fff;outline-offset:3px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="top"><div id="sum">—</div><div id="parts">サイコロを振ってください</div></div>
+<div class="panel">
+  <div class="row" id="counts"><div class="lab">個数</div></div>
+  <div class="row" id="types"><div class="lab">面の数</div></div>
+  <button id="roll">振る</button>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const V3=THREE.Vector3,Q=THREE.Quaternion,UP=new V3(0,1,0),PHI=(1+Math.sqrt(5))/2;
+const signs=a=>{let o=[[]];for(const c of a){const n=[];for(const p of o){n.push([...p,c]);if(c)n.push([...p,-c])}o=n}return o};
+const cyc=l=>l.flatMap(([x,y,z])=>[[x,y,z],[z,x,y],[y,z,x]]);
+const SHAPES={
+4:()=>[[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]],
+6:()=>signs([1,1,1]),
+8:()=>[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]],
+10:()=>{const h=1.1,c=Math.cos(Math.PI/5),k=h*(1-c)/(1+c),p=[[0,h,0],[0,-h,0]];for(let i=0;i<5;i++){const a=i*Math.PI*2/5,b=a+Math.PI/5;p.push([Math.cos(a),k,Math.sin(a)],[Math.cos(b),-k,Math.sin(b)])}return p},
+12:()=>[...signs([1,1,1]),...cyc(signs([0,1/PHI,PHI]))],
+20:()=>cyc(signs([0,1,PHI])),
+32:()=>cyc([...signs([0,1,3*PHI]),...signs([1,2+PHI,2*PHI]),...signs([PHI,2,2*PHI+1])])
+};
+const PIPS={1:[4],2:[0,8],3:[0,4,8],4:[0,2,6,8],5:[0,2,4,6,8],6:[0,2,3,5,6,8]};
+
+/* 凸包(総当たり): 同一平面の頂点をまとめて面にする */
+function hull(P){const out=new Map(),E=1e-4,n=P.length;
+ for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)for(let k=j+1;k<n;k++){
+  const nr=P[j].clone().sub(P[i]).cross(P[k].clone().sub(P[i]));if(nr.lengthSq()<1e-12)continue;nr.normalize();
+  const d=nr.dot(P[i]);let pos=0,neg=0;
+  for(let m=0;m<n&&!(pos&&neg);m++){const s=nr.dot(P[m])-d;if(s>E)pos=1;else if(s<-E)neg=1}
+  if(pos&&neg)continue;if(pos)nr.negate();
+  const dd=nr.dot(P[i]),idx=[];for(let m=0;m<n;m++)if(Math.abs(nr.dot(P[m])-dd)<E)idx.push(m);
+  const key=idx.join();if(!out.has(key))out.set(key,{n:nr,idx});
+ }return[...out.values()]}
+
+function faceTex(N,f){
+ const S=256,cv=document.createElement('canvas');cv.width=cv.height=S;const g=cv.getContext('2d');
+ g.fillStyle='#f6f4ee';g.fillRect(0,0,S,S);g.fillStyle='#17171a';g.textAlign='center';g.textBaseline='middle';
+ if(N==4){f.s.forEach((vi,j)=>{const dx=f.uv[j][0]*S-S/2,dy=(1-f.uv[j][1])*S-S/2;g.save();g.translate(S/2+dx*.62,S/2+dy*.62);g.rotate(Math.atan2(dx,-dy));g.font='bold '+S*.17+'px sans-serif';g.fillText(vi+1,0,0);g.restore()})}
+ else if(N==6){const h=S/2*f.r,a=h*.5;for(const i of PIPS[f.num]){g.beginPath();g.arc(S/2+(i%3-1)*a,S/2+(Math.floor(i/3)-1)*a,h*.17,0,7);g.fill()}}
+ else{g.font='bold '+Math.round(S*f.r*.62)+'px sans-serif';g.fillText(f.num+(f.num==6||f.num==9?'.':''),S/2,S/2+S*.02)}
+ const t=new THREE.CanvasTexture(cv);t.encoding=THREE.sRGBEncoding;t.anisotropy=4;return t}
+
+const cache={};
+function getShape(N){if(cache[N])return cache[N];
+ const P=SHAPES[N]().map(a=>new V3(...a));const R=Math.max(...P.map(p=>p.length()));P.forEach(p=>p.divideScalar(R));
+ const faces=hull(P),geo=new THREE.BufferGeometry(),pos=[],uvs=[];let start=0;
+ const nums=new Array(faces.length).fill(0),byNum={};
+ if(N!=4){let k=1;for(let i=0;i<faces.length;i++){if(nums[i])continue;
+  const j=N%2?-1:faces.findIndex((g,j)=>j!=i&&!nums[j]&&g.n.dot(faces[i].n)<-.99);
+  if(j>=0){nums[i]=k;nums[j]=N+1-k;k++}else nums[i]=k++}}
+ faces.forEach((f,fi)=>{
+  const c=new V3();f.idx.forEach(i=>c.add(P[i]));c.divideScalar(f.idx.length);
+  let e1=P[f.idx[0]].clone().sub(c).normalize(),e2=f.n.clone().cross(e1);
+  const ang=i=>{const d=P[i].clone().sub(c);return Math.atan2(d.dot(e2),d.dot(e1))};
+  const s=f.idx.slice().sort((a,b)=>ang(a)-ang(b));
+  e1=P[s[0]].clone().add(P[s[1]]).multiplyScalar(.5).sub(c).normalize();e2=f.n.clone().cross(e1);
+  let Rm=0,ir=1e9;s.forEach(i=>Rm=Math.max(Rm,P[i].distanceTo(c)));
+  s.forEach((i,j)=>ir=Math.min(ir,P[i].clone().add(P[s[(j+1)%s.length]]).multiplyScalar(.5).distanceTo(c)));
+  f.s=s;f.r=ir/Rm;f.num=nums[fi];byNum[f.num]=fi;
+  f.uv=s.map(i=>{const d=P[i].clone().sub(c);return[.5+d.dot(e1)/(2*Rm),.5+d.dot(e2)/(2*Rm)]});
+  for(let j=1;j<s.length-1;j++)for(const q of[0,j,j+1]){const p=P[s[q]];pos.push(p.x,p.y,p.z);uvs.push(...f.uv[q])}
+  geo.addGroup(start,(s.length-2)*3,fi);start+=(s.length-2)*3;
+ });
+ geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+ geo.setAttribute('uv',new THREE.Float32BufferAttribute(uvs,2));geo.computeVertexNormals();
+ const mats=faces.map(f=>new THREE.MeshStandardMaterial({map:faceTex(N,f),roughness:.38,metalness:0,polygonOffset:true,polygonOffsetFactor:1,polygonOffsetUnits:1}));
+ return cache[N]={N,P,faces,geo,mats,byNum,edges:new THREE.EdgesGeometry(geo,5)}}
+
+/* シーン */
+const cv=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas:cv,antialias:true,alpha:true});
+renderer.outputEncoding=THREE.sRGBEncoding;renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+const scene=new THREE.Scene(),cam=new THREE.PerspectiveCamera(40,1,.1,100);
+scene.add(new THREE.HemisphereLight(0xffffff,0x335544,.8));
+const sun=new THREE.DirectionalLight(0xffffff,.95);sun.position.set(3,9,4);sun.castShadow=true;
+sun.shadow.mapSize.set(2048,2048);Object.assign(sun.shadow.camera,{left:-9,right:9,top:9,bottom:-9,near:1,far:30});sun.shadow.bias=-.0005;scene.add(sun);
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(80,80),new THREE.ShadowMaterial({opacity:.5}));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);
+function resize(){const w=innerWidth,h=innerHeight;renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(w,h,false);
+ cam.aspect=w/h;cam.updateProjectionMatrix();
+ const dist=Math.max(11,4.6/(Math.tan(20*Math.PI/180)*cam.aspect));
+ cam.position.set(0,.8,.6).normalize().multiplyScalar(dist);cam.lookAt(0,-.4,0)}
+addEventListener('resize',resize);resize();
+
+/* サイコロ */
+let N=6,count=2,dice=[],busy=false,gen=0;
+const SLOTS={1:[0],2:[-1.6,1.6],3:[-2.9,0,2.9]};
+const edgeMat=new THREE.LineBasicMaterial({color:0xa9a69c});
+const support=(sh,q)=>-Math.min(...sh.P.map(p=>p.clone().applyQuaternion(q).y));
+function finalQ(sh,val){const dir=sh.N==4?sh.P[val-1].clone().normalize():sh.faces[sh.byNum[val]].n.clone();
+ return new Q().setFromAxisAngle(UP,Math.random()*6.283).multiply(new Q().setFromUnitVectors(dir,UP))}
+function build(){
+ dice.forEach(d=>scene.remove(d.mesh));dice=[];const sh=getShape(N);
+ SLOTS[count].forEach(x=>{const mesh=new THREE.Mesh(sh.geo,sh.mats);mesh.castShadow=true;mesh.add(new THREE.LineSegments(sh.edges,edgeMat));
+  const qf=finalQ(sh,1);mesh.quaternion.copy(qf);mesh.position.set(x,support(sh,qf),0);scene.add(mesh);dice.push({mesh,sh,x})});
+ sum.textContent='—';parts.textContent=N+'面 × '+count+'個（振ってください）'}
+
+function roll(){
+ if(busy)return;busy=true;rollBtn.disabled=true;navigator.vibrate&&navigator.vibrate(15);sum.textContent='…';parts.textContent='';
+ const my=++gen,t0=performance.now();
+ dice.forEach((d,i)=>{d.val=1+Math.floor(Math.random()*N);d.qf=finalQ(d.sh,d.val);d.rest=support(d.sh,d.qf);
+  d.axis=new V3(Math.random()-.5,Math.random()-.5,Math.random()-.5).normalize();
+  d.ang=Math.PI*2*(2+Math.random()*2.5)*(Math.random()<.5?-1:1);
+  d.sx=d.x+(Math.random()-.5)*3;d.sz=-6;d.ez=(Math.random()-.5)*.8;d.dur=2300+i*300});
+ (function step(now){if(my!==gen)return;let live=false;
+  dice.forEach(d=>{const t=Math.min(1,(now-t0)/d.dur);if(t<1)live=true;
+   const e=1-Math.pow(1-t,3),u=1-Math.pow(1-t,2);
+   const q=new Q().setFromAxisAngle(d.axis,d.ang*(1-e)).multiply(d.qf);
+   const yb=d.rest+3.4*Math.pow(1-t,1.4)*Math.abs(Math.sin(Math.PI*(2.7*t+.3)));
+   d.mesh.quaternion.copy(q);
+   d.mesh.position.set(d.sx+(d.x-d.sx)*u,t<1?Math.max(yb,support(d.sh,q)):d.rest,d.sz+(d.ez-d.sz)*u)});
+  if(live)requestAnimationFrame(step);
+  else{busy=false;rollBtn.disabled=false;navigator.vibrate&&navigator.vibrate(35);const v=dice.map(d=>d.val);
+   sum.textContent='合計 '+v.reduce((a,b)=>a+b,0);parts.textContent=v.length>1?v.join(' + '):''}
+ })(t0);
+}
+
+/* UI */
+const sum=document.getElementById('sum'),parts=document.getElementById('parts'),rollBtn=document.getElementById('roll');
+function mk(id,list,fmt,isType){const box=document.getElementById(id);
+ list.forEach(v=>{const b=document.createElement('button');b.className='chip';b.textContent=fmt(v);b.dataset.v=v;box.appendChild(b)});
+ box.addEventListener('click',e=>{const b=e.target.closest('button.chip');if(!b)return;const v=+b.dataset.v;
+  if(isType)N=v;else count=v;gen++;busy=false;rollBtn.disabled=false;sync();build()})}
+function sync(){document.querySelectorAll('#counts .chip').forEach(b=>b.setAttribute('aria-pressed',+b.dataset.v===count));
+ document.querySelectorAll('#types .chip').forEach(b=>b.setAttribute('aria-pressed',+b.dataset.v===N))}
+mk('counts',[1,2,3],v=>v+'個',false);mk('types',[4,6,8,10,12,20,32],v=>v+'面',true);
+rollBtn.onclick=roll;cv.onclick=roll;
+addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();roll()}});
+sync();build();
+addEventListener('error',e=>{parts.textContent='エラー: '+e.message});
+(function loop(){requestAnimationFrame(loop);try{renderer.render(scene,cam)}catch(e){parts.textContent='描画エラー: '+e.message}})();
+if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+</script>
+</body>
+</html>
